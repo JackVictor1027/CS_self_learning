@@ -191,7 +191,7 @@ lab1_print_cur_status(void) {
             "mov %%es, %2;"
             "mov %%ss, %3;"
             : "=m"(reg1), "=m"(reg2), "=m"(reg3), "=m"(reg4));//操作数约束
-    cprintf("%d: @ring %d\n", round, reg1 & 3);
+    cprintf("%d: @ring %d\n", round, reg1 & 3);//reg1 & 3 取 reg1 的最低两位，这表示当前的特权级别（ring level）。在 x86 架构中，有四个特权级别（0-3），最低两位定义了当前的特权级别。
     cprintf("%d:  cs = %x\n", round, reg1);
     cprintf("%d:  ds = %x\n", round, reg2);
     cprintf("%d:  es = %x\n", round, reg3);
@@ -203,3 +203,141 @@ lab1_print_cur_status(void) {
 数字前加前缀 “％“，如％1，％2 等表示使用寄存器的样板操作数。可以使用的操作数总数取决于具体 CPU 中通用寄存器的数量，如 Intel 可以有 8 个。指令中有几个操作数，就说明有几个变量需要与寄存器结合，由 gcc 在编译时根据后面输出部分和输入部分的约束条件进行相应的处理。由于这些样板操作数的前缀使用了”％“，因此，在用到具体的寄存器时就在前面加两个“％”，如%%cr0。
 
 ![image-20240730204102565](C:\Users\ASUS\AppData\Roaming\Typora\typora-user-images\image-20240730204102565.png)
+
+## 分析bootloader加入保护模式的过程
+
+BIOS 将通过读取硬盘主引导扇区到内存，并转跳到对应内存中的位置执行 bootloader。请分析bootloader 是如何完成从实模式进入保护模式的。
+
+提示：需要阅读 3.2.1 小节“保护模式和分段机制”和 lab1/boot/bootasm.S 源码，了解如何从实模式切换到保护模式。
+
+源码如下：
+
+```
+//引用头文件
+#include <asm.h>
+
+```
+包含汇编相关的宏和定义。
+
+```
+//定义常量
+# Start the CPU: switch to 32-bit protected mode, jump into C.
+# The BIOS loads this code from the first sector of the hard disk into
+# memory at physical address 0x7c00 and starts executing in real mode
+# with %cs=0 %ip=7c00.
+
+.set PROT_MODE_CSEG,        0x8                     # kernel code segment selector
+.set PROT_MODE_DSEG,        0x10                    # kernel data segment selector
+.set CR0_PE_ON,             0x1                     # protected mode enable flag
+
+```
+- 定义了保护模式下代码段和数据段的**选择子**。
+- 定义了CR0寄存器中用于**开启保护模式**的标志位。
+
+```
+# start address should be 0:7c00, in real mode, the beginning address of the running bootloader
+.globl start
+start:
+.code16                                             # Assemble for 16-bit mode
+    cli                                             # Disable interrupts
+    cld                                             # String operations increment
+
+```
+- start 是程序入口，使用 .globl 声明为全局符号。
+- .code16 指定接下来的代码是16位模式。
+- cli 禁用中断，cld 设置字符串操作的方向标志位。
+
+```
+//设置段寄存器
+    # Set up the important data segment registers (DS, ES, SS).
+    xorw %ax, %ax                                   # Segment number zero
+    movw %ax, %ds                                   # -> Data Segment
+    movw %ax, %es                                   # -> Extra Segment
+    movw %ax, %ss                                   # -> Stack Segment
+```
+将 ax 清零，并将其加载到数据段（ds）、额外段（es）和堆栈段（ss）寄存器中。
+
+```
+//启用A20地址线
+    # Enable A20:
+    #  For backwards compatibility with the earliest PCs, physical
+    #  address line 20 is tied low, so that addresses higher than
+    #  1MB wrap around to zero by default. This code undoes this.
+seta20.1:
+    inb $0x64, %al                                  # Wait for not busy(8042 input buffer empty).
+    testb $0x2, %al
+    jnz seta20.1
+
+    movb $0xd1, %al                                 # 0xd1 -> port 0x64
+    outb %al, $0x64                                 # 0xd1 means: write data to 8042's P2 port
+
+seta20.2:
+    inb $0x64, %al                                  # Wait for not busy(8042 input buffer empty).
+    testb $0x2, %al
+    jnz seta20.2
+
+    movb $0xdf, %al                                 # 0xdf -> port 0x60
+    outb %al, $0x60                                 # 0xdf = 11011111, means set P2's A20 bit(the 1 bit) to 1
+    
+```
+- 使能A20地址线，允许访问1MB以上内存。
+- 使用键盘控制器（8042）来设置A20地址线。
+
+```
+//切换到保护模式
+    # Switch from real to protected mode, using a bootstrap GDT
+    # and segment translation that makes virtual addresses
+    # identical to physical addresses, so that the
+    # effective memory map does not change during the switch.
+    lgdt gdtdesc
+    movl %cr0, %eax
+    orl $CR0_PE_ON, %eax
+    movl %eax, %cr0
+
+    # Jump to next instruction, but in 32-bit code segment.
+    # Switches processor into 32-bit mode.
+    ljmp $PROT_MODE_CSEG, $protcseg
+```
+- 加载全局描述符表（GDT），并设置CR0寄存器的保护模式启用位。
+- 使用长跳转指令（ljmp）切换到32位代码段。
+    
+
+```
+.code32                                             # Assemble for 32-bit mode
+protcseg:
+    # Set up the protected-mode data segment registers
+    movw $PROT_MODE_DSEG, %ax                       # Our data segment selector
+    movw %ax, %ds                                   # -> DS: Data Segment
+    movw %ax, %es                                   # -> ES: Extra Segment
+    movw %ax, %fs                                   # -> FS
+    movw %ax, %gs                                   # -> GS
+    movw %ax, %ss                                   # -> SS: Stack Segment
+
+    # Set up the stack pointer and call into C. The stack region is from 0--start(0x7c00)
+    movl $0x0, %ebp
+    movl $start, %esp
+    call bootmain
+
+    # If bootmain returns (it shouldn't), loop.
+spin:
+    jmp spin
+    ```
+- 切换到32位模式后，设置数据段、额外段、FS、GS和堆栈段寄存器。
+- 设置堆栈指针，并调用C函数 bootmain。
+- 若C代码返回，进入无限循环。
+
+```
+//GDT和描述符表
+# Bootstrap GDT
+.p2align 2                                          # force 4 byte alignment
+gdt:
+    SEG_NULLASM                                     # null seg
+    SEG_ASM(STA_X|STA_R, 0x0, 0xffffffff)           # code seg for bootloader and kernel
+    SEG_ASM(STA_W, 0x0, 0xffffffff)                 # data seg for bootloader and kernel
+
+gdtdesc:
+    .word 0x17                                      # sizeof(gdt) - 1
+    .long gdt                                       # address gdt
+```
+- 定义了GDT（全局描述符表），包含空段、代码段和数据段描述符。
+- gdtdesc 是GDT的描述符，指明GDT的大小和地址。
