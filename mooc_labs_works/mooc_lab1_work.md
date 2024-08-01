@@ -159,7 +159,7 @@ $ make "V="
 
 $ man make
 
-## 使用 qemu 执行并调试 lab1 中的软件。（要求在报告中简要写出练习过程）
+## 练习2：使用 qemu 执行并调试 lab1 中的软件。（要求在报告中简要写出练习过程）
 
 为了熟悉使用 qemu 和 gdb 进行的调试工作，我们进行如下的小练习：
 1. 从 CPU 加电后执行的第一条指令开始，单步跟踪 BIOS 的执行。
@@ -204,7 +204,7 @@ lab1_print_cur_status(void) {
 
 ![image-20240730204102565](C:\Users\ASUS\AppData\Roaming\Typora\typora-user-images\image-20240730204102565.png)
 
-## 分析bootloader加入保护模式的过程
+## 练习3：分析bootloader加入保护模式的过程
 
 BIOS 将通过读取硬盘主引导扇区到内存，并转跳到对应内存中的位置执行 bootloader。请分析bootloader 是如何完成从实模式进入保护模式的。
 
@@ -300,7 +300,7 @@ seta20.2:
 ```
 - 加载全局描述符表（GDT），并设置CR0寄存器的保护模式启用位。
 - 使用长跳转指令（ljmp）切换到32位代码段。
-    
+  
 
 ```
 .code32                                             # Assemble for 32-bit mode
@@ -321,7 +321,7 @@ protcseg:
     # If bootmain returns (it shouldn't), loop.
 spin:
     jmp spin
-    ```
+```
 - 切换到32位模式后，设置数据段、额外段、FS、GS和堆栈段寄存器。
 - 设置堆栈指针，并调用C函数 bootmain。
 - 若C代码返回，进入无限循环。
@@ -341,3 +341,93 @@ gdtdesc:
 ```
 - 定义了GDT（全局描述符表），包含空段、代码段和数据段描述符。
 - gdtdesc 是GDT的描述符，指明GDT的大小和地址。
+
+## 练习4：**分析** **bootloader** **加载** **ELF** **格式的** **OS** **的过程。（要求在报告中写出分析）**
+
+### 1.什么是ELF
+
+ELF(Executable and linking format)文件格式是 Linux 系统下的一种常用目标文件(object file)格式，有三种主要类型: 
+
+ 用于执行的可执行文件(executable file)，用于提供程序的进程映像，加载的内存执行。 这也是本实验的 OS 文件类型。
+
+ 用于连接的可重定位文件(relocatable file)，可与其它目标文件一起创建可执行文件和共享目标文件。
+
+ 共享目标文件(shared object file),连接器可将它与其它可重定位文件和共享目标文件连接成其它的目标文件，动态连接器又可将它与可执行文件和其它共享目标文件结合起来创建一个进程映像。
+
+### 2. bootmain.c源码分析
+
+首先我们可以知道的是，bootmain这个程序就是bootloader的入口程序。
+
+1. 先读取磁盘的第一页，大小为512字节*8。这里执行的ELF文件就是executable file，用于提供程序的进程映像、加载的内存执行。
+
+2. 如果验证发现，这里一个合法的ELF（ELF得到执行之后，可以映像到虚拟文件），就接着执行第3步，否则直接跳到第5步.
+
+   > ELF本质上就是一种数据结构，用于在程序执行时提供必要信息。
+
+3. 加载当前页的每一个程序段。
+
+4. 执行ELF header程序
+
+   > program header 描述与程序执行直接相关的目标文件结构信息，用来在文件中定位各个段的映像，同时包含其他一些用来为程序创建进程映像所必需的信息。
+
+5. 引导程序发出错误警告
+
+   > 这里调用了两次主要执行I/O端口读写的outw(port,value)函数，port指的是目标端口地址，value是要写入端口的16位的值。在这里的作用是通过调用，硬件或固件可以检测到引导加载程序进入了错误状态，并采取适当的措施（如重启或进入故障处理模式）。
+
+### 3.bootloader 如何读取硬盘扇区的？
+
+bootloader 让 CPU 进入**保护模式**后，下一步的工作就是**从硬盘上加载并运行 OS**。考虑到实现的简单性，bootloader 的访问硬盘都是 **LBA 模式的 PIO（Program IO）**方式，即所有的 IO 操作是**通过CPU 访问硬盘的 IO 地址寄存器**完成。
+
+总的来说，bootloader读取硬盘扇区大致可以分为四步：
+
+1. 等待磁盘准备好
+2. 发出读取扇区的命令
+3. 等待磁盘准备好
+4. 把磁盘扇区数据读到指定内存
+
+![image-20240801141405966](C:\Users\ASUS\AppData\Roaming\Typora\typora-user-images\image-20240801141405966.png)
+
+### 4. bootmain.c文件首部注释翻译
+
+源码文件种首段部分有对源码的功能说明，感觉很有用，于是就顺势翻译了下。
+
+```c
+/* *********************************************************************
+ * This a dirt simple boot loader, whose sole job is to boot
+ * an ELF kernel image from the first IDE hard disk.
+ * 这是一个简单的bootloader，它的功能就是从首个IDE硬盘区加载ELF内核镜像
+ *
+ * DISK LAYOUT
+ *  * This program(bootasm.S and bootmain.c) is the bootloader.
+ *    It should be stored in the first sector of the disk.
+ *	本程序就是bootloader，它应该存储在第一个磁盘区。
+ *
+ *  * The 2nd sector onward holds the kernel image.
+ * 第二个磁盘区应该防止内核镜像
+ *
+ *  * The kernel image must be in ELF format.
+ * 其中，内核镜像必须依赖于ELF
+ *
+ * BOOT UP STEPS
+ * 启动步骤
+ *  * when the CPU boots it loads the BIOS into memory and executes it
+ * 当 CPU 启动时，它会将 BIOS 载入内存并执行它 
+ *
+ *  * the BIOS intializes devices, sets of the interrupt routines, and
+ *    reads the first sector of the boot device(e.g., hard-drive)
+ *    into memory and jumps to it.
+ * BIOS 会初始化设备、设置中断例程，并将启动设备（如硬盘）的第一个扇区读入内存并跳转到该扇区。并跳转到它。
+ *
+ *  * Assuming this boot loader is stored in the first sector of the
+ *    hard-drive, this code takes over...
+ * 假设这个bootloader存储在硬盘，这份代码就会接管系统
+ *
+ *  * control starts in bootasm.S -- which sets up protected mode,
+ *    and a stack so C code then run, then calls bootmain()
+ * 控制bootasm.S中的开始，这将会开始保护模式，并设置一个C代码可以运行的栈，再调用bootmain函数
+ *
+ *  * bootmain() in this file takes over, reads in the kernel and jumps to it.
+ * 在本文件中的bootmain程序开始了工作，读取内核并跳到它所在的程序当中去。
+ * */
+```
+
